@@ -1,0 +1,16 @@
+import { Router } from "express";
+import { register, login, getMe } from "../controllers/auth.controller.js";
+import { authenticate } from "../middlewares/auth.middleware.js";
+import { validate } from "../middlewares/validate.middleware.js";
+import { registerSchema, loginSchema } from "../validation/auth.validation.js";
+
+const router = Router();
+
+// Public routes with Zod validation middleware
+router.post("/register", validate(registerSchema), register);
+router.post("/login", validate(loginSchema), login);
+
+// Protected routes
+router.get("/me", authenticate, getMe);
+
+export default router;

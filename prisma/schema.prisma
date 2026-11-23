@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Platform {
+  FACEBOOK
+  INSTAGRAM
+  TWITTER
+  LINKEDIN
+  TIKTOK
+  YOUTUBE
+  PINTEREST
+  REDDIT
+  THREADS
+  BLUESKY
+  SNAPCHAT
+  TELEGRAM
+  GOOGLE_BUSINESS
+  WHATSAPP
+}
+
+enum AccountStatus {
+  CONNECTED
+  DISCONNECTED
+  NOT_CONNECTED
+}
+
+enum PostType {
+  FEED
+  REEL
+  STORY
+  CAROUSEL
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+model User {
+  id                 String   @id @default(uuid())
+  name               String
+  email              String   @unique
+  password           String
+  ayrshareProfileKey String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  socialAccounts SocialAccount[]
+  posts          Post[]
+}
+
+model SocialAccount {
+  id           String        @id @default(uuid())
+  userId       String
+  platform     Platform
+  username     String?
+  displayName  String?
+  status       AccountStatus @default(NOT_CONNECTED)
+  connectedAt  DateTime      @default(now())
+  lastSyncedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform])
+}
+
+model Post {
+  id             String     @id @default(uuid())
+  userId         String
+  caption        String
+  postType       PostType   @default(FEED)
+  mediaUrls      String[]   @default([])
+  scheduledAt    DateTime?
+  status         PostStatus @default(DRAFT)
+  ayrsharePostId String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
