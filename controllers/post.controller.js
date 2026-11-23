@@ -1,109 +1,124 @@
-import axios from "axios";
 import prisma from "../config/db.js";
+import zernio from "../config/zernio.js";
 import ApiResponse from "../utils/apiResponse.js";
 import ApiError from "../utils/apiError.js";
 import {
   HTTP_STATUS,
-  AYRSHARE_ENDPOINTS,
+  PLATFORMS,
+  getPlatformEnum,
   POST_TYPES,
   POST_STATUS,
 } from "../utils/constants.js";
 
-const buildAyrsharePayload = ({ caption, platforms, postType, mediaUrls, scheduledAt }) => {
-  const payload = {
-    post: caption,
-    platforms,
-  };
-
-  if (mediaUrls && mediaUrls.length > 0) {
-    payload.mediaUrls = mediaUrls;
-  }
-
-  // Attach scheduled date if post is to be scheduled
-  if (scheduledAt) {
-    payload.scheduleDate = new Date(scheduledAt).toISOString();
-  }
-
-  // Instagram-specific formatting
-  if (platforms.includes("instagram")) {
-    if (postType === POST_TYPES.REEL) {
-      payload.instagramOptions = {
-        reel: true,
-        shareToFeed: true,
-      };
-    } else if (postType === POST_TYPES.STORY) {
-      payload.instagramOptions = {
-        story: true,
-      };
-    }
-  }
-
-  return payload;
-};
-
+/**
+ * Create and publish or schedule a social media post via Zernio
+ * POST /api/posts
+ * Validated by: validate(createPostSchema)
+ */
 export const createPost = async (req, res, next) => {
   try {
-    const { caption, platforms, postType, mediaUrls, scheduledAt } = req.body;
+    const { caption = "", platforms, postType, mediaUrls, scheduledAt } = req.body;
     const userId = req.user.id;
-    const profileKey = req.user.ayrshareProfileKey;
+    const profileId = req.user.zernioProfileId;
 
-    let ayrsharePostId = null;
-    let initialStatus = scheduledAt ? POST_STATUS.SCHEDULED : POST_STATUS.PUBLISHED;
-
-    // Send post to Ayrshare if user has profileKey and API key is set
-    if (profileKey && process.env.AYRSHARE_API_KEY) {
-      try {
-        const payload = buildAyrsharePayload({
-          caption,
-          platforms,
-          postType,
-          mediaUrls,
-          scheduledAt,
-        });
-
-        const ayrshareResponse = await axios.post(AYRSHARE_ENDPOINTS.POST, payload, {
-          headers: {
-            Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-            "Profile-Key": profileKey,
-            "Content-Type": "application/json",
-          },
-        });
-
-        ayrsharePostId = ayrshareResponse.data?.id || null;
-      } catch (err) {
-        console.error("Ayrshare publishing error:", err.response?.data || err.message);
-        initialStatus = POST_STATUS.FAILED;
-
-        // Throw error if user explicitly needs publishing to succeed immediately
-        const errorMsg =
-          err.response?.data?.message ||
-          err.response?.data?.error ||
-          "Failed to publish post via Ayrshare";
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, errorMsg);
-      }
-    } else if (!profileKey) {
+    if (!profileId && process.env.ZERNIO_API_KEY) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
-        "You must connect your social media profile before creating posts."
+        "No Zernio profile found. Please connect your social media accounts first."
       );
+    }
+
+    const platformEnums = platforms.map((p) => getPlatformEnum(p)).filter(Boolean);
+
+    const connectedAccounts = await prisma.socialAccount.findMany({
+      where: {
+        userId,
+        platform: { in: platformEnums },
+        status: "CONNECTED",
+      },
+    });
+
+    let zernioPostId = null;
+    let initialStatus = scheduledAt ? POST_STATUS.SCHEDULED : POST_STATUS.PUBLISHED;
+
+    // Call Zernio API if API key is present
+    if (process.env.ZERNIO_API_KEY) {
+      try {
+        // Build Zernio platforms array with accountId and platform-specific options
+        const zernioPlatforms = platforms.map((p) => {
+          const platformEnum = getPlatformEnum(p);
+          const targetAcc = connectedAccounts.find((a) => a.platform === platformEnum);
+
+          const entry = {
+            platform: PLATFORMS[platformEnum] || p,
+            accountId: targetAcc?.accountId || targetAcc?.id || "default",
+          };
+
+          // Instagram specific options (Story, Reel)
+          if (p === "instagram") {
+            if (postType === POST_TYPES.STORY) {
+              entry.platformSpecificData = {
+                contentType: "story",
+              };
+            } else if (postType === POST_TYPES.REEL) {
+              entry.platformSpecificData = {
+                shareToFeed: true,
+              };
+            }
+          }
+
+          return entry;
+        });
+
+        // Build Zernio post body
+        const postBody = {
+          content: postType === POST_TYPES.STORY ? "" : (caption || ""),
+          platforms: zernioPlatforms,
+          mediaItems: (mediaUrls || []).map((url) => ({ url })),
+        };
+
+        // Attach scheduling or publishNow flag
+        if (scheduledAt) {
+          postBody.scheduledFor = new Date(scheduledAt).toISOString();
+          postBody.timezone = "Asia/Kolkata";
+        } else {
+          postBody.publishNow = true;
+        }
+
+        const { data } = await zernio.posts.createPost({
+          body: postBody,
+        });
+
+        zernioPostId = data?.post?._id || data?.post?.id || data?._id || data?.id || null;
+      } catch (err) {
+        console.error("Zernio publishing error:", err?.message || err);
+        initialStatus = POST_STATUS.FAILED;
+
+        const errorMsg =
+          err?.body?.error ||
+          err?.body?.message ||
+          err?.message ||
+          "Failed to schedule or publish post via Zernio";
+        throw new ApiError(HTTP_STATUS.BAD_REQUEST, errorMsg);
+      }
     }
 
     // Save post record in PostgreSQL using Prisma
     const newPost = await prisma.post.create({
       data: {
         userId,
-        caption,
+        caption: postType === POST_TYPES.STORY ? "" : (caption || ""),
         postType,
         mediaUrls: mediaUrls || [],
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         status: initialStatus,
-        ayrsharePostId,
+        zernioPostId,
       },
     });
 
     return new ApiResponse({
       statusCode: HTTP_STATUS.CREATED,
-      message: scheduledAt ? "Post scheduled successfully" : "Post published successfully",
+      message: scheduledAt ? "Post scheduled successfully via Zernio" : "Post published successfully via Zernio",
       data: newPost,
     }).send(res);
   } catch (error) {
@@ -172,6 +187,7 @@ export const getPostById = async (req, res, next) => {
 /**
  * Update a scheduled post
  * PATCH /api/posts/:id
+ * Validated by: validate(updatePostSchema)
  */
 export const updatePost = async (req, res, next) => {
   try {
@@ -193,6 +209,27 @@ export const updatePost = async (req, res, next) => {
         HTTP_STATUS.BAD_REQUEST,
         "Cannot edit a post that has already been published"
       );
+    }
+
+    // If scheduled on Zernio, update on Zernio as well
+    if (post.zernioPostId && process.env.ZERNIO_API_KEY) {
+      try {
+        await zernio.posts.updatePost({
+          path: {
+            postId: post.zernioPostId,
+          },
+          body: {
+            ...(caption && { content: caption }),
+            ...(mediaUrls && { mediaItems: mediaUrls.map((url) => ({ url })) }),
+            ...(scheduledAt && {
+              scheduledFor: new Date(scheduledAt).toISOString(),
+              timezone: "Asia/Kolkata",
+            }),
+          },
+        });
+      } catch (err) {
+        console.warn("Zernio updatePost notice:", err?.message || err);
+      }
     }
 
     // Update in database
@@ -219,14 +256,13 @@ export const updatePost = async (req, res, next) => {
 };
 
 /**
- * Delete a post (cancels on Ayrshare and deletes from database)
+ * Delete a post (cancels on Zernio cloud queue and deletes from database)
  * DELETE /api/posts/:id
  */
 export const deletePost = async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const profileKey = req.user.ayrshareProfileKey;
 
     // Verify post ownership
     const post = await prisma.post.findFirst({
@@ -237,24 +273,16 @@ export const deletePost = async (req, res, next) => {
       throw new ApiError(HTTP_STATUS.NOT_FOUND, "Post not found");
     }
 
-    // If post has an Ayrshare ID and Ayrshare key is configured, cancel on Ayrshare
-    if (post.ayrsharePostId && profileKey && process.env.AYRSHARE_API_KEY) {
+    // If post has a Zernio ID, cancel it from Zernio queue
+    if (post.zernioPostId && process.env.ZERNIO_API_KEY) {
       try {
-        await axios.delete(AYRSHARE_ENDPOINTS.POST, {
-          headers: {
-            Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-            "Profile-Key": profileKey,
-            "Content-Type": "application/json",
-          },
-          data: {
-            id: post.ayrsharePostId,
+        await zernio.posts.deletePost({
+          path: {
+            postId: post.zernioPostId,
           },
         });
       } catch (err) {
-        console.warn(
-          "Ayrshare post cancellation notice:",
-          err.response?.data?.message || err.message
-        );
+        console.warn("Zernio post cancellation notice:", err?.message || err);
       }
     }
 

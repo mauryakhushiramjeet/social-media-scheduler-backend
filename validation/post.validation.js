@@ -5,10 +5,11 @@ import { HTTP_STATUS, POST_SCHEDULER_PLATFORMS, POST_TYPES } from "../utils/cons
 // Zod Schema for Creating a Post
 export const createPostSchema = z
   .object({
-    caption: z.string().trim().min(1, "Caption is required"),
+    caption: z.string().trim().default("").optional(),
     platforms: z
       .array(z.string().trim().toLowerCase())
-      .min(1, "At least one target platform is required"),
+      .min(1, "At least one target platform is required")
+      .max(1, "You can select only one account to share a post at a time"),
     postType: z
       .enum([POST_TYPES.FEED, POST_TYPES.REEL, POST_TYPES.STORY, POST_TYPES.CAROUSEL])
       .default(POST_TYPES.FEED),
@@ -29,6 +30,26 @@ export const createPostSchema = z
           path: ["platforms"],
         });
       }
+    }
+
+    // Story format constraint: Supported on Instagram only
+    if (data.postType === POST_TYPES.STORY) {
+      if (!data.platforms.every((p) => p === "instagram")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Story format is currently supported only on Instagram",
+          path: ["platforms"],
+        });
+      }
+    }
+
+    // Caption is required for Feed, Reel, and Carousel, but not Story (Stories are media-only)
+    if (data.postType !== POST_TYPES.STORY && (!data.caption || !data.caption.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Caption is required for this post format",
+        path: ["caption"],
+      });
     }
 
     // Media requirements by post type

@@ -1,49 +1,46 @@
-import axios from "axios";
 import prisma from "../config/db.js";
+import zernio from "../config/zernio.js";
 import ApiResponse from "../utils/apiResponse.js";
 import ApiError from "../utils/apiError.js";
-import { HTTP_STATUS, AYRSHARE_ENDPOINTS, PLATFORMS, getPlatformEnum } from "../utils/constants.js";
+import { HTTP_STATUS, PLATFORMS, getPlatformEnum } from "../utils/constants.js";
 
-const getOrCreateProfileKey = async (user) => {
-  if (user.ayrshareProfileKey) {
-    return user.ayrshareProfileKey;
+
+const getOrCreateProfileId = async (user) => {
+  if (user.zernioProfileId) {
+    return user.zernioProfileId;
   }
 
-  if (!process.env.AYRSHARE_API_KEY) {
+  if (!process.env.ZERNIO_API_KEY) {
     throw new ApiError(
       HTTP_STATUS.BAD_REQUEST,
-      "Ayrshare API key is missing in environment variables. Please configure AYRSHARE_API_KEY."
+      "Zernio API key is not configured in environment variables."
     );
   }
 
   try {
-    const response = await axios.post(
-      AYRSHARE_ENDPOINTS.PROFILES,
-      { title: user.name },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const profileKey = response.data?.profileKey;
-    if (!profileKey) {
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, "Failed to retrieve profile key from Ayrshare");
-    }
-
-    // Update in database
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { ayrshareProfileKey: profileKey },
+    const { data } = await zernio.profiles.createProfile({
+      body: {
+        name: `Customer ${user.id}`,
+        externalId: user.id,
+        timezone: "Asia/Kolkata",
+      },
     });
 
-    return profileKey;
+    const profileId = data?.profile?._id || data?.profile?.id || data?._id || data?.id;
+    if (!profileId) {
+      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, "Failed to retrieve profile ID from Zernio");
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { zernioProfileId: profileId },
+    });
+
+    return profileId;
   } catch (error) {
     throw new ApiError(
       HTTP_STATUS.INTERNAL_SERVER_ERROR,
-      error.response?.data?.message || "Failed to create Ayrshare profile"
+      error?.message || "Failed to create Zernio customer profile"
     );
   }
 };
@@ -52,42 +49,46 @@ export const connectSocialAccount = async (req, res, next) => {
   try {
     const { platform } = req.body;
     const platformEnum = req.platformEnum || getPlatformEnum(platform);
-    const ayrsharePlatform = PLATFORMS[platformEnum];
+    const zernioPlatform = PLATFORMS[platformEnum];
 
-    const profileKey = await getOrCreateProfileKey(req.user);
+    const profileId = await getOrCreateProfileId(req.user);
 
-    const response = await axios.post(
-      AYRSHARE_ENDPOINTS.GENERATE_JWT,
-      {
-        profileKey,
-        expiresIn: "1h",
-        allowedSocial: [ayrsharePlatform],
+    const clientOrigin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+    let redirectUrl =
+      req.body.redirectUrl ||
+      (clientOrigin ? `${clientOrigin}/social/callback` : null) ||
+      process.env.CLIENT_REDIRECT_URL ||
+      "http://localhost:5173/social/callback";
+
+    if (redirectUrl.includes(":3000")) {
+      redirectUrl = redirectUrl.replace(":3000", ":5173");
+    }
+
+    const { data } = await zernio.connect.getConnectUrl({
+      path: {
+        platform: zernioPlatform,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+      query: {
+        profileId,
+        redirect_url: redirectUrl,
+        redirectUrl: redirectUrl,
+      },
+    });
 
-    const linkUrl = response.data?.url;
-    if (!linkUrl) {
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, "Could not generate social authorization link");
+    const connectUrl = data?.authUrl;
+    if (!connectUrl) {
+      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, "Could not generate authorization URL from Zernio");
     }
 
     return new ApiResponse({
       statusCode: HTTP_STATUS.OK,
       message: `Authorization URL for ${platform} generated successfully`,
       data: {
-        url: linkUrl,
-        platform: ayrsharePlatform,
+        url: connectUrl,
+        platform: zernioPlatform,
       },
     }).send(res);
   } catch (error) {
-    if (error.response?.data?.message) {
-      return next(new ApiError(error.response.status || HTTP_STATUS.INTERNAL_SERVER_ERROR, error.response.data.message));
-    }
     next(error);
   }
 };
@@ -95,26 +96,27 @@ export const connectSocialAccount = async (req, res, next) => {
 export const disconnectSocialAccount = async (req, res, next) => {
   try {
     const { platform } = req.params;
-    const platformEnum = req.platformEnum;
-    const ayrsharePlatform = PLATFORMS[platformEnum];
+    const platformEnum = req.platformEnum || getPlatformEnum(platform);
+    const zernioPlatform = PLATFORMS[platformEnum];
 
-    if (req.user.ayrshareProfileKey && process.env.AYRSHARE_API_KEY) {
+    const existingAccount = await prisma.socialAccount.findUnique({
+      where: {
+        userId_platform: {
+          userId: req.user.id,
+          platform: platformEnum,
+        },
+      },
+    });
+
+    if (existingAccount?.accountId && process.env.ZERNIO_API_KEY) {
       try {
-        await axios.delete(AYRSHARE_ENDPOINTS.UNLINK_SOCIAL, {
-          headers: {
-            Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-            "Profile-Key": req.user.ayrshareProfileKey,
-            "Content-Type": "application/json",
-          },
-          data: {
-            platform: ayrsharePlatform,
+        await zernio.accounts.deleteAccount({
+          path: {
+            accountId: existingAccount.accountId,
           },
         });
       } catch (err) {
-        console.warn(
-          `Ayrshare unlink notice for ${platform}:`,
-          err.response?.data?.message || err.message
-        );
+        console.warn(`Zernio deleteAccount notice for ${platform}:`, err?.message || err);
       }
     }
 
@@ -132,7 +134,7 @@ export const disconnectSocialAccount = async (req, res, next) => {
       statusCode: HTTP_STATUS.OK,
       message: `${platform} account disconnected successfully`,
       data: {
-        platform: ayrsharePlatform,
+        platform: zernioPlatform,
         status: "DISCONNECTED",
       },
     }).send(res);
@@ -149,6 +151,7 @@ export const getSocialAccounts = async (req, res, next) => {
       },
       select: {
         id: true,
+        accountId: true,
         platform: true,
         username: true,
         displayName: true,
@@ -168,32 +171,93 @@ export const getSocialAccounts = async (req, res, next) => {
   }
 };
 
+/**
+ * Sync connected social accounts with Zernio
+ * POST /api/social/sync
+ */
 export const syncSocialAccounts = async (req, res, next) => {
   try {
-    if (!req.user.ayrshareProfileKey || !process.env.AYRSHARE_API_KEY) {
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        "Cannot sync accounts. Ayrshare profile or API key is not configured."
-      );
+    let profileId =
+      req.user.zernioProfileId ||
+      req.body?.profileId ||
+      req.query?.profileId;
+
+    if (!profileId && req.user.id) {
+      const dbUser = await prisma.user.findUnique({ where: { id: req.user.id } });
+      profileId = dbUser?.zernioProfileId;
     }
 
-    const response = await axios.get(AYRSHARE_ENDPOINTS.USER, {
-      headers: {
-        Authorization: `Bearer ${process.env.AYRSHARE_API_KEY}`,
-        "Profile-Key": req.user.ayrshareProfileKey,
+    if (profileId && req.user.id && !req.user.zernioProfileId) {
+      await prisma.user.update({
+        where: { id: req.user.id },
+        data: { zernioProfileId: profileId },
+      });
+    }
+
+    // Direct account upsert if callback params are present
+    const connectedPlatform = req.body?.connected || req.query?.connected;
+    if (connectedPlatform) {
+      const platformEnum = getPlatformEnum(connectedPlatform);
+      if (platformEnum) {
+        const directAccountId = req.body?.accountId || req.query?.accountId || null;
+        const directUsername = req.body?.username || req.query?.username || null;
+        await prisma.socialAccount.upsert({
+          where: {
+            userId_platform: {
+              userId: req.user.id,
+              platform: platformEnum,
+            },
+          },
+          update: {
+            accountId: directAccountId,
+            username: directUsername,
+            displayName: directUsername,
+            status: "CONNECTED",
+            lastSyncedAt: new Date(),
+          },
+          create: {
+            userId: req.user.id,
+            platform: platformEnum,
+            accountId: directAccountId,
+            username: directUsername,
+            displayName: directUsername,
+            status: "CONNECTED",
+            connectedAt: new Date(),
+            lastSyncedAt: new Date(),
+          },
+        });
+      }
+    }
+
+    if (!profileId || !process.env.ZERNIO_API_KEY) {
+      const localAccounts = await prisma.socialAccount.findMany({
+        where: { userId: req.user.id },
+      });
+      return new ApiResponse({
+        statusCode: HTTP_STATUS.OK,
+        message: "Social accounts synced from local session",
+        data: localAccounts,
+      }).send(res);
+    }
+
+    // List all accounts under the user's Zernio profile
+    const response = await zernio.accounts.listAccounts({
+      query: {
+        profileId,
       },
     });
 
-    const activeSocial = response.data?.activeSocialAccounts || [];
-    const displayNames = response.data?.displayNames || {};
-
+    const accountsList = response.data?.accounts || response.data || [];
     const syncedAccounts = [];
 
-    for (const ayrPlatform of activeSocial) {
-      const platformEnum = getPlatformEnum(ayrPlatform);
+    for (const acc of accountsList) {
+      const platformEnum = getPlatformEnum(acc.platform);
       if (!platformEnum) continue;
 
-      const displayName = displayNames[ayrPlatform] || null;
+      const accountId = acc._id || acc.id || null;
+      const username = acc.username || acc.handle || null;
+      const displayName = acc.displayName || acc.name || null;
+      const isConnected = acc.status !== "disconnected";
 
       const account = await prisma.socialAccount.upsert({
         where: {
@@ -203,15 +267,19 @@ export const syncSocialAccounts = async (req, res, next) => {
           },
         },
         update: {
-          status: "CONNECTED",
+          accountId,
+          username,
           displayName,
+          status: isConnected ? "CONNECTED" : "DISCONNECTED",
           lastSyncedAt: new Date(),
         },
         create: {
           userId: req.user.id,
           platform: platformEnum,
+          accountId,
+          username,
           displayName,
-          status: "CONNECTED",
+          status: isConnected ? "CONNECTED" : "DISCONNECTED",
           connectedAt: new Date(),
           lastSyncedAt: new Date(),
         },
@@ -220,15 +288,16 @@ export const syncSocialAccounts = async (req, res, next) => {
       syncedAccounts.push(account);
     }
 
+    const allAccounts = await prisma.socialAccount.findMany({
+      where: { userId: req.user.id },
+    });
+
     return new ApiResponse({
       statusCode: HTTP_STATUS.OK,
-      message: "Social accounts synced successfully",
-      data: syncedAccounts,
+      message: "Social accounts synced successfully from Zernio",
+      data: allAccounts,
     }).send(res);
   } catch (error) {
-    if (error.response?.data?.message) {
-      return next(new ApiError(error.response.status || HTTP_STATUS.INTERNAL_SERVER_ERROR, error.response.data.message));
-    }
     next(error);
   }
 };

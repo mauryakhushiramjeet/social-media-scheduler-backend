@@ -6,6 +6,7 @@ import { HTTP_STATUS, PLATFORMS, getPlatformEnum } from "../utils/constants.js";
 export const connectSocialSchema = z
   .object({
     platform: z.string().trim().min(1, "Platform name is required"),
+    redirectUrl: z.string().url().optional(),
   })
   .superRefine((data, ctx) => {
     const platformEnum = getPlatformEnum(data.platform);

@@ -6,6 +6,7 @@ import { HTTP_STATUS } from "./utils/constants.js";
 import authRoutes from "./routes/auth.routes.js";
 import socialMediaRoutes from "./routes/socialMedia.routes.js";
 import postRoutes from "./routes/post.routes.js";
+import mediaRoutes from "./routes/media.routes.js";
 
 const app = express();
 
@@ -34,6 +35,7 @@ app.get("/", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/social", socialMediaRoutes);
 app.use("/api/posts", postRoutes);
+app.use("/api/media", mediaRoutes);
 
 // Central Error Handling Middleware
 app.use((err, req, res, next) => {

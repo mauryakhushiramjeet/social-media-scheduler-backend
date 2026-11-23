@@ -33,7 +33,7 @@ export const authenticate = async (req, res, next) => {
         id: true,
         name: true,
         email: true,
-        ayrshareProfileKey: true,
+        zernioProfileId: true,
         createdAt: true,
         updatedAt: true,
       },
