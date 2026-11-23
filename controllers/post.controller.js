@@ -10,11 +10,7 @@ import {
   POST_STATUS,
 } from "../utils/constants.js";
 
-/**
- * Create and publish or schedule a social media post via Zernio
- * POST /api/posts
- * Validated by: validate(createPostSchema)
- */
+
 export const createPost = async (req, res, next) => {
   try {
     const { caption = "", platforms, postType, mediaUrls, scheduledAt } = req.body;
@@ -54,7 +50,6 @@ export const createPost = async (req, res, next) => {
             accountId: targetAcc?.accountId || targetAcc?.id || "default",
           };
 
-          // Instagram specific options (Story, Reel)
           if (p === "instagram") {
             if (postType === POST_TYPES.STORY) {
               entry.platformSpecificData = {
@@ -70,14 +65,12 @@ export const createPost = async (req, res, next) => {
           return entry;
         });
 
-        // Build Zernio post body
         const postBody = {
           content: postType === POST_TYPES.STORY ? "" : (caption || ""),
           platforms: zernioPlatforms,
           mediaItems: (mediaUrls || []).map((url) => ({ url })),
         };
 
-        // Attach scheduling or publishNow flag
         if (scheduledAt) {
           postBody.scheduledFor = new Date(scheduledAt).toISOString();
           postBody.timezone = "Asia/Kolkata";
@@ -103,7 +96,6 @@ export const createPost = async (req, res, next) => {
       }
     }
 
-    // Save post record in PostgreSQL using Prisma
     const newPost = await prisma.post.create({
       data: {
         userId,
@@ -126,10 +118,6 @@ export const createPost = async (req, res, next) => {
   }
 };
 
-/**
- * Get all posts for the authenticated user
- * GET /api/posts
- */
 export const getPosts = async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -154,10 +142,7 @@ export const getPosts = async (req, res, next) => {
   }
 };
 
-/**
- * Get a single post by ID (must belong to authenticated user)
- * GET /api/posts/:id
- */
+
 export const getPostById = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -184,18 +169,12 @@ export const getPostById = async (req, res, next) => {
   }
 };
 
-/**
- * Update a scheduled post
- * PATCH /api/posts/:id
- * Validated by: validate(updatePostSchema)
- */
 export const updatePost = async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
     const { caption, mediaUrls, scheduledAt } = req.body;
 
-    // Verify post ownership
     const post = await prisma.post.findFirst({
       where: { id, userId },
     });
@@ -211,7 +190,6 @@ export const updatePost = async (req, res, next) => {
       );
     }
 
-    // If scheduled on Zernio, update on Zernio as well
     if (post.zernioPostId && process.env.ZERNIO_API_KEY) {
       try {
         await zernio.posts.updatePost({
@@ -232,7 +210,6 @@ export const updatePost = async (req, res, next) => {
       }
     }
 
-    // Update in database
     const updatedPost = await prisma.post.update({
       where: { id },
       data: {
@@ -255,10 +232,7 @@ export const updatePost = async (req, res, next) => {
   }
 };
 
-/**
- * Delete a post (cancels on Zernio cloud queue and deletes from database)
- * DELETE /api/posts/:id
- */
+
 export const deletePost = async (req, res, next) => {
   try {
     const { id } = req.params;

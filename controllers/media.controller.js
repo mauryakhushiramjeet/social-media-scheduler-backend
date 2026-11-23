@@ -4,11 +4,7 @@ import ApiResponse from "../utils/apiResponse.js";
 import ApiError from "../utils/apiError.js";
 import { HTTP_STATUS } from "../utils/constants.js";
 
-/**
- * 1-Step Direct Upload: Receives file from Frontend via Multer,
- * requests a presigned URL from Zernio, uploads the buffer, and returns the public HTTPS URL.
- * POST /api/media/upload
- */
+
 export const uploadMedia = async (req, res, next) => {
   try {
     if (!req.file) {
@@ -72,11 +68,6 @@ export const uploadMedia = async (req, res, next) => {
   }
 };
 
-/**
- * 2-Step Presigned URL: Returns uploadUrl and publicUrl directly so
- * frontend can upload directly to cloud storage if desired.
- * POST /api/media/presign
- */
 export const getPresignedUrl = async (req, res, next) => {
   try {
     const { filename, contentType, size } = req.body;
